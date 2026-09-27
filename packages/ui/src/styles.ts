@@ -116,10 +116,26 @@ export const badgeStyles = stylex.create({
     whiteSpace: "nowrap",
   },
   neutral: { backgroundColor: colors.surfaceSubtle, color: colors.foregroundMuted },
+  muted: {
+    backgroundColor: "transparent",
+    borderColor: colors.border,
+    color: colors.foregroundMuted,
+  },
+  accent: {
+    backgroundColor: `color-mix(in oklch, ${colors.primary} 10%, transparent)`,
+    color: colors.primary,
+  },
   success: { backgroundColor: colors.successSurface, color: colors.success },
   warning: { backgroundColor: colors.warningSurface, color: colors.warning },
   danger: { backgroundColor: colors.dangerSurface, color: colors.danger },
   info: { backgroundColor: colors.infoSurface, color: colors.info },
+  outline: {
+    backgroundColor: "transparent",
+    borderColor: "color-mix(in oklch, currentColor 40%, transparent)",
+  },
+  outlineNeutral: { borderColor: colors.borderStrong, color: colors.foreground },
+  outlineMuted: { borderColor: colors.border, borderStyle: "dashed" },
+  mono: { fontFamily: typography.fontMono, fontSize: typography.sizeXs, letterSpacing: 0 },
   dot: { backgroundColor: "currentColor", borderRadius: "999px", height: "6px", width: "6px" },
 });
 

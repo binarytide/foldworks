@@ -101,6 +101,8 @@ export type CardConfig<Message> = StyledConfig<Message> &
     action?: Children;
     children: Children;
     footer?: Children;
+    /** Remove content padding so tables, lists, and code blocks reach the card edges. */
+    flush?: boolean;
   }>;
 
 const card = <Message>(config: CardConfig<Message>, h: HtmlBuilder<Message>): Html =>
@@ -110,28 +112,56 @@ const card = <Message>(config: CardConfig<Message>, h: HtmlBuilder<Message>): Ht
     config.action === undefined
       ? []
       : [
-          h.header(slotAttrs(config.slotProps?.header, h, styles.cardHeader), [
-            h.div(slotAttrs(config.slotProps?.heading, h, styles.cardHeading), [
-              ...(config.title === undefined
-                ? []
-                : [h.h3(slotAttrs(config.slotProps?.title, h, styles.title), [config.title])]),
-              ...(config.description === undefined
+          h.header(
+            slotAttrs(
+              config.slotProps?.header,
+              h,
+              styles.cardHeader,
+              config.flush === true && styles.cardHeaderFlush,
+            ),
+            [
+              h.div(slotAttrs(config.slotProps?.heading, h, styles.cardHeading), [
+                ...(config.title === undefined
+                  ? []
+                  : [h.h3(slotAttrs(config.slotProps?.title, h, styles.title), [config.title])]),
+                ...(config.description === undefined
+                  ? []
+                  : [
+                      h.p(slotAttrs(config.slotProps?.description, h, styles.description), [
+                        config.description,
+                      ]),
+                    ]),
+              ]),
+              ...(config.action === undefined
                 ? []
                 : [
-                    h.p(slotAttrs(config.slotProps?.description, h, styles.description), [
-                      config.description,
-                    ]),
+                    h.div(slotAttrs(config.slotProps?.action, h, styles.cardAction), config.action),
                   ]),
-            ]),
-            ...(config.action === undefined
-              ? []
-              : [h.div(slotAttrs(config.slotProps?.action, h, styles.cardAction), config.action)]),
-          ]),
+            ],
+          ),
         ]),
-    h.div(slotAttrs(config.slotProps?.content, h, styles.cardContent), config.children),
+    h.div(
+      slotAttrs(
+        config.slotProps?.content,
+        h,
+        styles.cardContent,
+        config.flush === true && styles.cardContentFlush,
+      ),
+      config.children,
+    ),
     ...(config.footer === undefined
       ? []
-      : [h.footer(slotAttrs(config.slotProps?.footer, h, styles.cardFooter), config.footer)]),
+      : [
+          h.footer(
+            slotAttrs(
+              config.slotProps?.footer,
+              h,
+              styles.cardFooter,
+              config.flush === true && styles.cardFooterFlush,
+            ),
+            config.footer,
+          ),
+        ]),
   ]);
 
 const empty = <Message>(

@@ -50,12 +50,19 @@ export const Model = S.Struct({
   commandQuery: S.String,
   page: S.Int,
   selectedCalendarDay: S.Int,
+  isSnippetCopied: S.Boolean,
   announcement: S.String,
   answerPresentation: AnswerPresentation,
   committedReference: S.String,
   zoom: S.Int,
 });
 export type Model = typeof Model.Type;
+
+export const catalogSnippet = `{% if applicant.citizenship == "citizen" %}
+  {{ applicant.legal_name | upcase }}
+{% else %}
+  {{ applicant.alien_number | default: "N/A" }}
+{% endif %}`;
 
 export const initialModel: Model = {
   desktop: Desktop.initialModel,
@@ -90,6 +97,7 @@ export const initialModel: Model = {
   commandQuery: "",
   page: 2,
   selectedCalendarDay: 4,
+  isSnippetCopied: false,
   announcement: "UI component demo ready.",
   answerPresentation: "value",
   committedReference: "EMP-2041",

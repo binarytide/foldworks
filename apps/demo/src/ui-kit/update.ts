@@ -1,11 +1,11 @@
 import * as Desktop from "./desktop";
-import { Update } from "foldkit";
-import { Option } from "effect";
-import { Stateful } from "@foldworks/ui";
+import { Command, Update } from "foldkit";
+import { Effect, Option, Schema as S } from "effect";
+import { CodeBlock, Stateful } from "@foldworks/ui";
 import { evo } from "foldkit/struct";
 
 import { Message } from "./message";
-import type { Model } from "./model";
+import { catalogSnippet, type Model } from "./model";
 import {
   AccountTabs,
   ActionMenu,
@@ -13,6 +13,20 @@ import {
   DepartmentSelect,
   ToolCombobox,
 } from "./components";
+
+const CopySnippet = Command.define("CopyCatalogSnippet", {
+  args: { text: S.String },
+  messages: [Message.CompletedCopySnippet],
+  execute: ({ text }) =>
+    CodeBlock.writeClipboard(text).pipe(
+      Effect.map((isCopied) => Message.CompletedCopySnippet({ isCopied })),
+    ),
+});
+
+const ClearCopiedSnippet = Command.define("ClearCopiedCatalogSnippet", {
+  messages: [Message.ClearedCopiedSnippet],
+  execute: Effect.sleep("2 seconds").pipe(Effect.as(Message.ClearedCopiedSnippet())),
+});
 
 const foldTabs = Update.foldChild({
   update: AccountTabs.update,
@@ -168,7 +182,7 @@ const showToast = (variant: Stateful.Toast.Variant) =>
   });
 
 export const update = (model: Model, message: Message): Update.Return<Model, Message> =>
-  Message.match(message, {
+  Message.match<Update.Return<Model, Message>>(message, {
     GotDesktop: ({ message }) =>
       Update.foldChild({
         update: Desktop.update,
@@ -296,5 +310,16 @@ export const update = (model: Model, message: Message): Update.Return<Model, Mes
     }),
     ClickedAction: ({ action }) => ({
       model: evo(model, { announcement: () => `${action} button selected.` }),
+    }),
+    ClickedCopySnippet: () => ({
+      model,
+      commands: [CopySnippet({ text: catalogSnippet })],
+    }),
+    CompletedCopySnippet: ({ isCopied }) =>
+      isCopied
+        ? { model: evo(model, { isSnippetCopied: () => true }), commands: [ClearCopiedSnippet()] }
+        : { model: evo(model, { announcement: () => "Clipboard access is unavailable." }) },
+    ClearedCopiedSnippet: () => ({
+      model: evo(model, { isSnippetCopied: () => false }),
     }),
   });
