@@ -30,7 +30,7 @@ import {
   codebaseRouter,
   diffViewerRouter,
   dataTablePath,
-  dataGridRouter,
+  dataGridPath,
   formBuilderPath,
   pdfAnnotatorRouter,
   pdfViewerRouter,
@@ -123,7 +123,7 @@ const packages: ReadonlyArray<Package> = [
     category: "Application primitive",
     description:
       "Pinned columns, virtualized rows, ordering, range selection, copy/paste, and editing.",
-    href: dataGridRouter(),
+    href: dataGridPath(),
     icon: Table2,
   },
   {
