@@ -302,6 +302,7 @@ The [integration guide](docs/stateful.md) includes complete tabs wiring and
 Dialog, Select, and Command usage. Dialog and Select support optional transitions
 that respect reduced motion. Select uses Foldkit's custom Listbox engine;
 `Select.control` and `NativeSelect.view` remain native browser controls.
+For conditional fields and animated presence, see the [animation guide](docs/animation.md).
 
 ### Read-only answers
 
