@@ -494,6 +494,16 @@ const dataDisplay = (model: Model, h: HtmlBuilder<Message>): Html =>
         },
         h,
       ),
+      Item.view(
+        {
+          title: "Review report activity",
+          description: "Open the latest activity",
+          trailing: ["3 new"],
+          onClick: action("Review report activity"),
+          isSelected: true,
+        },
+        h,
+      ),
       AspectRatio.view(
         {
           ratio: 3 / 1,
@@ -505,10 +515,24 @@ const dataDisplay = (model: Model, h: HtmlBuilder<Message>): Html =>
       Table.view(
         {
           caption: "Recent invoices",
-          columns: ["Invoice", "Status", "Amount"],
+          rowHeaders: true,
+          columns: ["Invoice", "Status", { label: "Amount", align: "end" }],
           rows: [
-            ["INV-024", "Paid", "$320"],
-            ["INV-025", "Pending", "$180"],
+            {
+              key: "INV-024",
+              cells: ["INV-024", "Paid", "$320"],
+              onClick: action("Open invoice INV-024"),
+              ariaLabel: "Open invoice INV-024",
+              isSelected: true,
+              tone: "success",
+            },
+            {
+              key: "INV-025",
+              cells: ["INV-025", "Pending", "$180"],
+              onClick: action("Open invoice INV-025"),
+              ariaLabel: "Open invoice INV-025",
+              tone: "warning",
+            },
           ],
         },
         h,
@@ -1040,6 +1064,16 @@ const overlaysAndMenus = (model: Model, h: HtmlBuilder<Message>): Html => {
               label: "Helpful context",
               isOpen: model.openComponent === "Tooltip",
               onOpenChange: (isOpen) => toggleComponent("Tooltip", isOpen),
+            },
+            h,
+          ),
+          Tooltip.view(
+            {
+              mode: "stateless",
+              id: "catalog-stateless-tooltip",
+              trigger: ["CSS tooltip"],
+              label: "Shown on hover or focus without model state",
+              placement: "bottom",
             },
             h,
           ),
