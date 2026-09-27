@@ -7,6 +7,8 @@ export * as Fieldset from "./fieldset";
 export * as Icon from "./icon";
 export * as Layout from "./layout";
 export * as Workspace from "./workspace";
+export * as SplitView from "./split-view";
+export * as AppHeader from "./app-header";
 export * as Tree from "./tree";
 export * as Panel from "./panel";
 export * as SegmentedControl from "./segmented-control";
