@@ -1,11 +1,13 @@
 import { Effect, Queue, Stream } from "effect";
 import { Mount } from "foldkit";
+import { Completion, isOver, offsetAtPoint } from "@foldworks/text-intelligence";
 
 import { caretLines } from "./caret";
 import { keepsFocus, resolveKey, type Action, type KeyInput, type Platform } from "./keymap";
 import { Message } from "./message";
 import { domIds, type Model } from "./model";
-import { dropTarget, find, roots, visibleRows, type DropTarget } from "./outline";
+import { dropTarget, find, moveItems, roots, visibleRows, type DropTarget } from "./outline";
+import { refusal, type Policy } from "./policy";
 import { selectedIds, selectedRoots } from "./selectors";
 import { serializeOutline } from "./text";
 
@@ -14,7 +16,16 @@ export const INDENT = 24;
 const DRAG_THRESHOLD = 4;
 const SCROLL_EDGE = 48;
 const SETTLE_TIMEOUT = 200;
+/** How long the pointer rests on text before asking for hover information. */
+const HOVER_DELAY = 350;
 const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "CapsLock"]);
+/** Messages that change the document other than by typing. */
+const EDITS: ReadonlySet<string> = new Set([
+  "Pressed",
+  "PastedText",
+  "AcceptedCompletion",
+  "Dropped",
+]);
 /** Dispatched on the element the outline just focused, so held keys can follow. */
 export const FOCUSED_EVENT = "fw-outliner-focused";
 const FOCUSABLE =
@@ -22,7 +33,9 @@ const FOCUSABLE =
 
 /** The view hands the latest model to the surface through this element property. */
 export const MODEL_PROPERTY = "foldworksOutliner";
-type Host = HTMLElement & { [MODEL_PROPERTY]?: Model };
+/** The host's policy, for refusing drops while dragging. */
+export const POLICY_PROPERTY = "foldworksOutlinerPolicy";
+type Host = HTMLElement & { [MODEL_PROPERTY]?: Model; [POLICY_PROPERTY]?: Policy };
 
 type SurfaceMessage = Extract<
   Message,
@@ -38,7 +51,14 @@ type SurfaceMessage = Extract<
       | "StartedDrag"
       | "MovedDrag"
       | "Dropped"
-      | "CancelledDrag";
+      | "CancelledDrag"
+      | "Hovered"
+      | "DismissedHover"
+      | "RequestedCompletion"
+      | "MovedCompletion"
+      | "AcceptedCompletion"
+      | "DismissedCompletion"
+      | "FilledPlaceholder";
   }
 >;
 
@@ -55,6 +75,30 @@ const rowIdOf = (target: EventTarget | null): string | undefined =>
 
 const isText = (target: EventTarget | null): target is HTMLTextAreaElement =>
   target instanceof HTMLTextAreaElement && target.dataset.outlineText !== undefined;
+
+const isPlaceholderText = (target: EventTarget | null): target is HTMLTextAreaElement =>
+  target instanceof HTMLTextAreaElement && target.dataset.placeholderText !== undefined;
+
+const ROW_OR_PLACEHOLDER = "[data-outline-row], [data-outline-placeholder]";
+
+/** The row or placeholder just above or below one, in screen order. */
+const neighbourOf = (row: Element, delta: -1 | 1): HTMLElement | undefined => {
+  let at = delta > 0 ? row.nextElementSibling : row.previousElementSibling;
+  while (at !== null && !at.matches(ROW_OR_PLACEHOLDER)) {
+    at = delta > 0 ? at.nextElementSibling : at.previousElementSibling;
+  }
+  return at instanceof HTMLElement ? at : undefined;
+};
+
+/** Puts the caret at the start or end of a row's or placeholder's text. */
+const focusTextOf = (row: HTMLElement, at: "Start" | "End") => {
+  const text = row.querySelector<HTMLTextAreaElement>("textarea");
+  if (text === null) return;
+  text.focus({ preventScroll: true });
+  const offset = at === "Start" ? 0 : text.value.length;
+  text.setSelectionRange(offset, offset);
+  text.scrollIntoView({ block: "nearest", inline: "nearest" });
+};
 
 const scrollParent = (element: HTMLElement): HTMLElement | undefined => {
   for (let node = element.parentElement; node !== null; node = node.parentElement) {
@@ -102,6 +146,13 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
     Message.MovedDrag,
     Message.Dropped,
     Message.CancelledDrag,
+    Message.Hovered,
+    Message.DismissedHover,
+    Message.RequestedCompletion,
+    Message.MovedCompletion,
+    Message.AcceptedCompletion,
+    Message.DismissedCompletion,
+    Message.FilledPlaceholder,
   ],
   execute: ({ element }) =>
     Stream.callback<SurfaceMessage>((queue) =>
@@ -115,9 +166,57 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
             let drag: Drag | undefined;
             let press: { rowId: string; headId: string } | undefined;
             const emit = (message: SurfaceMessage) => {
-              if (!disposed) Queue.offerUnsafe(queue, message);
+              if (disposed) return;
+              // After an edit that is not typing, such as undo, the model's text is
+              // the truth, even where it matches something typed earlier.
+              if (EDITS.has(message._tag)) unacknowledged.clear();
+              Queue.offerUnsafe(queue, message);
             };
-            const model = (): Model | undefined => host[MODEL_PROPERTY];
+            let latest: Model | undefined = host[MODEL_PROPERTY];
+            // Suggestions the keys closed stay closed until the next render shows it.
+            let completionClosed = false;
+            const model = (): Model | undefined => latest;
+
+            // Typing outruns rendering. A render can carry an item's text from a
+            // few keystrokes ago, and writing it would erase what was typed since.
+            // Text sent to the model is remembered until the model has it; when a
+            // render lands behind it, the newer text and caret are put back.
+            type Typed = Readonly<{ value: string; start: number; end: number }>;
+            const unacknowledged = new Map<string, Typed[]>();
+            let composing = false;
+            const acknowledge = (next: Model) => {
+              for (const [id, typed] of unacknowledged) {
+                const text = find(next.items, id)?.text;
+                const at =
+                  text === undefined ? -1 : typed.findIndex((entry) => entry.value === text);
+                const ahead = at < 0 ? [] : typed.slice(at + 1);
+                if (ahead.length === 0) {
+                  // Caught up, or changed some other way, such as undo: the model wins.
+                  unacknowledged.delete(id);
+                  continue;
+                }
+                unacknowledged.set(id, ahead);
+                const newest = ahead[ahead.length - 1]!;
+                queueMicrotask(() => {
+                  const element = doc.getElementById(domIds(next.id).text(id));
+                  if (!(element instanceof HTMLTextAreaElement) || composing) return;
+                  if (element.value === newest.value) return;
+                  element.value = newest.value;
+                  if (doc.activeElement === element) {
+                    element.setSelectionRange(newest.start, newest.end);
+                  }
+                });
+              }
+            };
+            Object.defineProperty(host, MODEL_PROPERTY, {
+              configurable: true,
+              get: () => latest,
+              set: (next: Model) => {
+                latest = next;
+                completionClosed = false;
+                acknowledge(next);
+              },
+            });
 
             // Actions that move focus re-render before the new caret exists. Keys
             // typed in that gap are held and replayed where focus lands.
@@ -136,11 +235,163 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
               if (!keepsFocus(action)) awaitFocus();
             };
 
+            /**
+             * While suggestions show for this text, they claim the keys that pick
+             * one, ahead of the key map, so Return never splits under them.
+             */
+            const completionKey = (
+              event: KeyInput,
+              target: HTMLTextAreaElement,
+              id: string,
+            ): boolean => {
+              const list = model()?.completion;
+              if (completionClosed || list === null || list === undefined || list.id !== id) {
+                return false;
+              }
+              // Only suggestions on screen take keys.
+              if (doc.getElementById(domIds(model()!.id).completion) === null) return false;
+              const shown = Completion.visible(list, target.value, target.selectionEnd);
+              const plain = !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+              if (shown.length === 0 || !plain) return false;
+              switch (event.key) {
+                case "ArrowDown":
+                case "ArrowUp":
+                  emit(Message.MovedCompletion({ delta: event.key === "ArrowDown" ? 1 : -1 }));
+                  return true;
+                case "Enter":
+                case "Tab":
+                  emit(Message.AcceptedCompletion({}));
+                  completionClosed = true;
+                  // Accepting moves the caret after a render; hold what is typed meanwhile.
+                  awaitFocus();
+                  return true;
+                case "Escape":
+                  emit(Message.DismissedCompletion());
+                  completionClosed = true;
+                  return true;
+                case "ArrowLeft":
+                case "ArrowRight":
+                case "Home":
+                case "End":
+                case "PageUp":
+                case "PageDown":
+                  // Moving the caret away from the word puts the suggestions away.
+                  emit(Message.DismissedCompletion());
+                  completionClosed = true;
+                  return false;
+                default:
+                  return false;
+              }
+            };
+
+            /** Turns a placeholder into an item holding its text with `typed` at its caret. */
+            const fill = (row: HTMLElement, typed: string, typedCaret: number) => {
+              const template = row.dataset.text ?? "";
+              const caret = Number(row.dataset.caret ?? template.length);
+              emit(
+                Message.FilledPlaceholder({
+                  parentId: row.dataset.parent ?? null,
+                  index: Number(row.dataset.index ?? 0),
+                  key: row.dataset.outlinePlaceholder ?? "",
+                  text: template.slice(0, caret) + typed + template.slice(caret),
+                  offset: caret + typedCaret,
+                }),
+              );
+              // The new item renders before it can take keys; hold them until it does.
+              awaitFocus();
+            };
+
+            /** Placeholders move like rows and turn into items on Return. */
+            const placeholderKey = (event: KeyInput, target: HTMLTextAreaElement): boolean => {
+              const row = target.closest<HTMLElement>("[data-outline-placeholder]");
+              if (row === null) return false;
+              const plain = !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+              if (event.key === "Tab") return true;
+              if (!plain) return false;
+              switch (event.key) {
+                case "Enter":
+                  fill(row, "", 0);
+                  return true;
+                case "ArrowUp":
+                case "ArrowLeft":
+                case "Backspace":
+                case "Escape": {
+                  const above = neighbourOf(row, -1);
+                  if (above !== undefined) focusTextOf(above, "End");
+                  return true;
+                }
+                case "ArrowDown":
+                case "ArrowRight": {
+                  const below = neighbourOf(row, 1);
+                  if (below !== undefined) focusTextOf(below, "Start");
+                  return true;
+                }
+                default:
+                  return false;
+              }
+            };
+
+            /** Arrows at the edge of a row's text step into a placeholder next to it. */
+            const intoPlaceholder = (action: Action, target: HTMLTextAreaElement): boolean => {
+              const row = target.closest<HTMLElement>("[data-outline-row]");
+              const delta =
+                action === "FocusNext" || action === "FocusNextStart"
+                  ? 1
+                  : action === "FocusPrevious" || action === "FocusPreviousEnd"
+                    ? -1
+                    : 0;
+              if (row === null || delta === 0) return false;
+              // A folded item's view sits between its row and the next one.
+              const view = (delta > 0 ? row : neighbourOf(row, -1))?.querySelector<HTMLElement>(
+                ":scope > [data-outline-view]",
+              );
+              if (view !== null && view !== undefined) {
+                view.focus();
+                return true;
+              }
+              const neighbour = neighbourOf(row, delta);
+              if (neighbour?.dataset.outlinePlaceholder === undefined) return false;
+              focusTextOf(neighbour, delta > 0 ? "Start" : "End");
+              return true;
+            };
+
+            /**
+             * Keys in a folded item's view belong to the host's view. On the view
+             * itself, ↑ and ↓ continue to the rows around it, and Esc anywhere in
+             * it returns to its row.
+             */
+            const viewKey = (event: KeyboardEvent, view: HTMLElement) => {
+              const plain = !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+              const row = view.closest<HTMLElement>("[data-outline-row]");
+              if (!plain || row === null || event.defaultPrevented) return;
+              if (event.key === "Escape") {
+                event.preventDefault();
+                focusTextOf(row, "End");
+                return;
+              }
+              if (event.target !== view) return;
+              if (event.key === "ArrowUp") {
+                event.preventDefault();
+                focusTextOf(row, "End");
+              } else if (event.key === "ArrowDown") {
+                event.preventDefault();
+                const below = neighbourOf(row, 1);
+                if (below !== undefined) focusTextOf(below, "Start");
+              }
+            };
+
             /** Resolves and dispatches a key against an element; `true` when the outline used it. */
-            const handleKey = (event: KeyInput, target: EventTarget | null): boolean => {
+            const handleKey = (
+              event: KeyInput,
+              target: EventTarget | null,
+              replayed = false,
+            ): boolean => {
+              if (isPlaceholderText(target)) return placeholderKey(event, target);
               if (isText(target)) {
                 const id = rowIdOf(target);
                 if (id === undefined) return false;
+                // Held keys were typed before any suggestions could be seen.
+                if (!replayed && completionKey(event, target, id)) return true;
                 const vertical = event.key === "ArrowUp" || event.key === "ArrowDown";
                 const lines = vertical
                   ? caretLines(target)
@@ -160,6 +411,17 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
                   platform,
                 );
                 if (action === undefined) return false;
+                if (intoPlaceholder(action, target)) return true;
+                if (action === "Complete") {
+                  emit(
+                    Message.RequestedCompletion({
+                      id,
+                      start: target.selectionStart,
+                      end: target.selectionEnd,
+                    }),
+                  );
+                  return true;
+                }
                 pressAction(action, id, target.selectionStart, target.selectionEnd, lines.x);
                 return true;
               }
@@ -173,8 +435,11 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
 
             const replay = (event: KeyInput) => {
               const target = doc.activeElement;
-              if (target === null || !host.contains(target) || handleKey(event, target)) return;
-              if (!isText(target) || event.ctrlKey || event.metaKey) return;
+              if (target === null || !host.contains(target) || handleKey(event, target, true))
+                return;
+              // Characters go into item text or into a placeholder, never a read-only row.
+              const writable = (isText(target) && !target.readOnly) || isPlaceholderText(target);
+              if (!writable || event.ctrlKey || event.metaKey) return;
               const text = event.key === "Enter" ? "\n" : event.key.length === 1 ? event.key : "";
               const command =
                 text !== ""
@@ -198,11 +463,80 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
               while (held.length > 0 && !settling) replay(held.shift()!);
             }
 
+            // Hover: the pointer rests on a character, then the host is asked about it.
+            let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+            let hoverPoint: { x: number; y: number } | undefined;
+            const hoverPopup = () => doc.getElementById(domIds(model()?.id ?? "").hover);
+            const hoveredRects = () =>
+              [...host.querySelectorAll(".fw-text-hovered")].flatMap((element) => [
+                ...element.getClientRects(),
+              ]);
+            const emitHover = (target: { id: string; offset: number } | null) => {
+              const current = model()?.hover ?? null;
+              const unchanged =
+                target === null
+                  ? // The pointer only dismisses what it asked for, not information shown for the caret.
+                    current === null || current.source === "Keyboard"
+                  : current?.source === "Pointer" &&
+                    current.id === target.id &&
+                    current.offset === target.offset;
+              if (!unchanged) emit(Message.Hovered({ target }));
+            };
+            const settleHover = () => {
+              const point = hoverPoint;
+              const under = point === undefined ? null : doc.elementFromPoint(point.x, point.y);
+              const id = isText(under) ? rowIdOf(under) : undefined;
+              const mirror = under?.parentElement?.querySelector("[data-outline-mirror]");
+              const offset =
+                point === undefined || mirror === null || mirror === undefined
+                  ? undefined
+                  : offsetAtPoint(mirror, point.x, point.y);
+              emitHover(id === undefined || offset === undefined ? null : { id, offset });
+            };
+            const trackHover = (event: PointerEvent) => {
+              if (event.pointerType === "touch") return;
+              const target = event.target instanceof Element ? event.target : null;
+              if (
+                target?.closest("[data-text-popup]") ||
+                isOver(hoveredRects(), event.clientX, event.clientY)
+              ) {
+                clearTimeout(hoverTimer);
+                return;
+              }
+              hoverPoint = { x: event.clientX, y: event.clientY };
+              clearTimeout(hoverTimer);
+              hoverTimer = setTimeout(settleHover, HOVER_DELAY);
+            };
+            const leave = () => {
+              hoverPoint = undefined;
+              clearTimeout(hoverTimer);
+              hoverTimer = setTimeout(settleHover, HOVER_DELAY);
+            };
+
             const keydown = (event: KeyboardEvent) => {
               if (drag?.active && event.key === "Escape") {
                 event.preventDefault();
                 endDrag(false);
                 return;
+              }
+              const view =
+                event.target instanceof Element
+                  ? event.target.closest<HTMLElement>("[data-outline-view]")
+                  : null;
+              if (view !== null) {
+                viewKey(event, view);
+                return;
+              }
+              if (hoverPopup() !== null && !MODIFIER_KEYS.has(event.key)) {
+                clearTimeout(hoverTimer);
+                const plain = !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+                if (event.key === "Escape" && plain) {
+                  event.preventDefault();
+                  emit(Message.DismissedHover());
+                  return;
+                }
+                // Information shown for the caret goes away once the caret moves on.
+                if (model()?.hover?.source === "Keyboard") emit(Message.DismissedHover());
               }
               if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
               if (settling) {
@@ -248,11 +582,32 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
               }
             };
 
+            /** Typing into a placeholder makes it an item holding what was typed. */
+            const fillFromInput = (target: HTMLTextAreaElement) => {
+              const row = target.closest<HTMLElement>("[data-outline-placeholder]");
+              const typed = target.value;
+              if (row === null || typed === "") return;
+              const caret = target.selectionEnd;
+              target.value = "";
+              fill(row, typed, caret);
+            };
+
             const input = (event: Event) => {
               const target = event.target;
+              if (isPlaceholderText(target)) {
+                if (!(event as InputEvent).isComposing) fillFromInput(target);
+                return;
+              }
               if (!isText(target)) return;
               const id = rowIdOf(target);
               if (id === undefined) return;
+              const typed = unacknowledged.get(id) ?? [];
+              typed.push({
+                value: target.value,
+                start: target.selectionStart,
+                end: target.selectionEnd,
+              });
+              unacknowledged.set(id, typed.slice(-64));
               emit(
                 Message.EditedText({
                   id,
@@ -299,8 +654,11 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
               return nodes.length === 0 ? undefined : serializeOutline(nodes);
             };
 
+            const inView = (target: EventTarget | null): boolean =>
+              target instanceof Element && target.closest("[data-outline-view]") !== null;
+
             const copy = (event: ClipboardEvent) => {
-              if (isText(event.target)) return;
+              if (isText(event.target) || inView(event.target)) return;
               const text = selectionText();
               if (text === undefined || event.clipboardData === null) return;
               event.preventDefault();
@@ -309,10 +667,21 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
               if (event.type === "cut" && id !== undefined) pressAction("Delete", id);
             };
 
+            const compositionstart = () => {
+              composing = true;
+            };
+
+            const compositionend = (event: CompositionEvent) => {
+              composing = false;
+              if (isPlaceholderText(event.target)) fillFromInput(event.target);
+            };
+
             const paste = (event: ClipboardEvent) => {
               const text = event.clipboardData?.getData("text/plain") ?? "";
               if (text === "") return;
               const target = event.target;
+              // Pasting into a placeholder types into it; a folded item's view handles its own.
+              if (isPlaceholderText(target) || inView(target)) return;
               if (isText(target)) {
                 // Single lines paste natively; several lines become several items.
                 if (!/\r|\n/.test(text.replace(/[\r\n]+$/, ""))) return;
@@ -362,7 +731,28 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
                 gap += 1;
               }
               const depth = current.depth + (current.x - current.startX) / INDENT;
-              return dropTarget(rows, current.ids, gap, depth, state.scopeId);
+              const wanted = dropTarget(rows, current.ids, gap, depth, state.scopeId);
+              const policy = host[POLICY_PROPERTY] ?? {};
+              if (policy.canMove === undefined && policy.isReadOnly === undefined) return wanted;
+              const allowed = (target: DropTarget) => {
+                const after = moveItems(state.items, current.ids, target.placement);
+                return (
+                  after === undefined ||
+                  refusal(policy, state.items, after, { cause: "Drop", ids: current.ids }) ===
+                    undefined
+                );
+              };
+              if (allowed(wanted)) return wanted;
+              // A refused depth falls back to the nearest allowed one in the same gap.
+              const deepest = Math.max(0, ...rows.map((row) => row.depth)) + 1;
+              const depths = Array.from({ length: deepest + 1 }, (_, level) => level).sort(
+                (a, b) => Math.abs(a - wanted.depth) - Math.abs(b - wanted.depth),
+              );
+              for (const level of depths) {
+                const candidate = dropTarget(rows, current.ids, gap, level, state.scopeId);
+                if (allowed(candidate)) return candidate;
+              }
+              return { ...wanted, refused: true };
             };
 
             const placeGhost = (current: Drag) => {
@@ -375,6 +765,9 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
               const target = computeTarget(current);
               if (!sameTarget(target, current.target)) {
                 current.target = target;
+                if (current.ghost !== null) {
+                  current.ghost.dataset.refused = String(target?.refused === true);
+                }
                 emit(Message.MovedDrag({ target }));
               }
             };
@@ -409,6 +802,18 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
               current.depth =
                 visibleRows(state.items, state.scopeId).find((row) => row.id === current.ids[0])
                   ?.depth ?? 0;
+              // Read-only items stay where they are; there is nothing to drag.
+              const isReadOnly = host[POLICY_PROPERTY]?.isReadOnly;
+              if (
+                isReadOnly !== undefined &&
+                current.ids.some((id) => {
+                  const node = find(state.items, id);
+                  return node !== undefined && isReadOnly(node);
+                })
+              ) {
+                drag = undefined;
+                return;
+              }
               current.active = true;
               const ghost = doc.createElement("div");
               ghost.className = "fw-outliner-ghost";
@@ -437,6 +842,11 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
             const pointerdown = (event: PointerEvent) => {
               const target = event.target instanceof Element ? event.target : null;
               if (target === null || event.button !== 0) return;
+              // A press anywhere but the suggestions themselves puts them away.
+              if (model()?.completion && !target.closest("[data-text-popup]")) {
+                emit(Message.DismissedCompletion());
+              }
+              if (inView(target)) return;
               if (target.closest("[data-outline-control]")) {
                 // Controls act without taking focus away from the text being edited.
                 event.preventDefault();
@@ -498,6 +908,7 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
                 retarget(current);
                 return;
               }
+              if (event.buttons === 0) trackHover(event);
               if (press === undefined || (event.buttons & 1) === 0) return;
               const over = rowAt(event.clientX, event.clientY);
               if (over === undefined || over === press.headId) return;
@@ -550,6 +961,8 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
             const listeners: ReadonlyArray<readonly [EventTarget, string, EventListener]> = [
               [host, "keydown", keydown as EventListener],
               [host, "input", input],
+              [host, "compositionstart", compositionstart],
+              [host, "compositionend", compositionend as EventListener],
               [host, "beforeinput", beforeinput as EventListener],
               [host, "focusin", focusin as EventListener],
               [host, "copy", copy as EventListener],
@@ -558,6 +971,7 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
               [host, "pointerdown", pointerdown as EventListener],
               [host, "pointermove", pointermove as EventListener],
               [host, "pointercancel", pointercancel],
+              [host, "pointerleave", leave],
               [host, "click", click as EventListener],
               [host, FOCUSED_EVENT, release],
               [doc, "pointerup", pointerup as EventListener],
@@ -567,7 +981,13 @@ export const Surface = Mount.defineStream("OutlinerSurface", {
               target.addEventListener(type, listener);
             return () => {
               disposed = true;
+              Object.defineProperty(host, MODEL_PROPERTY, {
+                configurable: true,
+                writable: true,
+                value: latest,
+              });
               clearTimeout(settleTimer);
+              clearTimeout(hoverTimer);
               endDrag(false);
               for (const [target, type, listener] of listeners) {
                 target.removeEventListener(type, listener);

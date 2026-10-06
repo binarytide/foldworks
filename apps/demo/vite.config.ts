@@ -31,6 +31,7 @@ export default defineConfig(({ mode }) => ({
       "@foldworks/outliner",
       "@foldworks/query-builder",
       "@foldworks/sidebar",
+      "@foldworks/text-intelligence",
       "@foldworks/ui",
       "@foldworks/workflow",
       "effect",

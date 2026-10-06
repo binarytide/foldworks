@@ -96,4 +96,16 @@ describe("resolveKey", () => {
       resolveKey(key("]", { code: "BracketRight", metaKey: true }), text(caret(1)), "mac"),
     ).toBe("Indent");
   });
+
+  it("asks for information at the caret with Ctrl+Shift+Space on every platform", () => {
+    const space = (modifiers: Partial<KeyInput>) => key(" ", { shiftKey: true, ...modifiers });
+    expect(resolveKey(space({ ctrlKey: true }), text(caret(3)), "mac")).toBe("ShowInfo");
+    expect(resolveKey(space({ ctrlKey: true }), text(caret(3)), "other")).toBe("ShowInfo");
+    expect(resolveKey(space({ metaKey: true }), text(caret(3)), "mac")).toBeUndefined();
+  });
+
+  it("asks for suggestions with Ctrl+Space on every platform", () => {
+    expect(resolveKey(key(" ", { ctrlKey: true }), text(caret(3)), "mac")).toBe("Complete");
+    expect(resolveKey(key(" ", { ctrlKey: true }), text(caret(3)), "other")).toBe("Complete");
+  });
 });

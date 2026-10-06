@@ -4,10 +4,13 @@ export {
   Item,
   Items,
   ancestors,
+  childrenOf,
   dropTarget,
   expandToLevel,
   find,
   indent,
+  insertItems,
+  isWithin,
   item,
   locate,
   mergeIntoPrevious,
@@ -21,6 +24,7 @@ export {
   setAllCollapsed,
   setCollapsed,
   split,
+  updateItem,
   visibleRows,
   walk,
   type DropTarget,
@@ -29,6 +33,14 @@ export {
   type Row,
 } from "./outline";
 export { parseOutline, serializeOutline, type SerializeOptions } from "./text";
+export {
+  keepsReadOnly,
+  reparented,
+  type Move,
+  type MoveCause,
+  type Policy,
+  type Reparented,
+} from "./policy";
 export {
   Action,
   resolveKey,
@@ -40,3 +52,4 @@ export {
   type ShortcutHelp,
 } from "./keymap";
 export { selectedIds, selectedRoots } from "./selectors";
+export type { FoldedView, HoverRequest, Placeholder, RowDecoration, TextSpan } from "./view";

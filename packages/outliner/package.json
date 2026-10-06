@@ -48,7 +48,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@foldworks/history": "workspace:*"
+    "@foldworks/history": "workspace:*",
+    "@foldworks/text-intelligence": "workspace:*"
   },
   "devDependencies": {
     "effect": "catalog:",

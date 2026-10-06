@@ -13,6 +13,7 @@ export * as Workspace from "./workspace";
 export * as SplitView from "./split-view";
 export * as AppHeader from "./app-header";
 export * as Tree from "./tree";
+export * as ValueTree from "./value-tree";
 export * as Panel from "./panel";
 export * as SegmentedControl from "./segmented-control";
 export * as Select from "./select";
@@ -26,6 +27,18 @@ export {
   ValueInspector,
 } from "./operational";
 export type { Consequence, ExplanationNode, TimelineEntry, ValueChange } from "./operational";
+export {
+  TreeDiff,
+  changedRegion,
+  diffTrees,
+  summarizeDiff,
+  type TreeDiffConfig,
+  type TreeDiffElidedRow,
+  type TreeDiffNode,
+  type TreeDiffNodeRow,
+  type TreeDiffRow,
+  type TreeDiffStatus,
+} from "./tree-diff";
 export { Accordion, Collapsible } from "./collections";
 export { Heading, Link, Text, VisuallyHidden } from "./content";
 export {

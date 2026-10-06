@@ -150,4 +150,130 @@ describe("update", () => {
     expect(texts(model)).toEqual(["Alpha", "  One", "  TwoBeta"]);
     expect(model.focus).toEqual({ id: "a2", start: 3, end: 3 });
   });
+
+  it("replaces the document as one undoable step without moving focus", () => {
+    const focused = update(start(), Message.FocusedText({ id: "b", start: 1, end: 1 })).model;
+    const replaced = update(
+      focused,
+      Message.Replace({
+        items: [item("b", "Beta"), item("a", "Alpha", [item("a1", "One"), item("a2", "Two")])],
+        announcement: "Swapped.",
+      }),
+    );
+    expect(replaced.commands ?? []).toEqual([]);
+    expect(texts(replaced.model)).toEqual(["Beta", "Alpha", "  One", "  Two"]);
+    expect(replaced.model.focus).toEqual({ id: "b", start: 1, end: 1 });
+    expect(replaced.model.announcement).toBe("Swapped.");
+    const undone = press(replaced.model, "Undo", "b", 1);
+    expect(texts(undone)).toEqual(["Alpha", "  One", "  Two", "Beta"]);
+  });
+
+  it("coalesces replacements that share a key and drops focus on removed items", () => {
+    let model = update(start(), Message.FocusedText({ id: "a2", start: 0, end: 0 })).model;
+    for (const text of ["B", "Be"]) {
+      model = update(
+        model,
+        Message.Replace({ items: [item("b", text)], announcement: "", coalescingKey: "source" }),
+      ).model;
+    }
+    expect(model.focus).toBeNull();
+    expect(texts(press(model, "Undo", "b"))).toEqual(["Alpha", "  One", "  Two", "Beta"]);
+  });
+
+  it("reveals an item inside a collapsed parent and outside the hoisted scope", () => {
+    const collapsed = press(start(), "Collapse", "a");
+    const hoisted = update(collapsed, Message.Hoisted({ id: "b" })).model;
+    const revealed = update(hoisted, Message.Reveal({ id: "a2" }));
+    expect(revealed.model.scopeId).toBeNull();
+    expect(texts(revealed.model)).toEqual(["Alpha", "  One", "  Two", "Beta"]);
+    expect(revealed.model.focus).toEqual({ id: "a2", start: 3, end: 3 });
+  });
+
+  it("shows hover information for the pointer or the caret until something else happens", () => {
+    const pointed = update(start(), Message.Hovered({ target: { id: "b", offset: 2 } })).model;
+    expect(pointed.hover).toEqual({ id: "b", offset: 2, source: "Pointer" });
+    expect(update(pointed, Message.Hovered({ target: { id: "b", offset: 2 } })).model).toBe(
+      pointed,
+    );
+    const typed = update(
+      pointed,
+      Message.EditedText({ id: "b", text: "Betas", start: 5, end: 5, time: 1 }),
+    ).model;
+    expect(typed.hover).toBeNull();
+    const asked = press(start(), "ShowInfo", "a", 3);
+    expect(asked.hover).toEqual({ id: "a", offset: 3, source: "Keyboard" });
+    expect(update(asked, Message.DismissedHover()).model.hover).toBeNull();
+    expect(press(asked, "Collapse", "a").hover).toBeNull();
+  });
+
+  it("offers, narrows, and accepts suggestions as one undoable step", () => {
+    const items = [{ label: "Bear" }, { label: "Beta" }, { label: "Beehive", insert: "Beehive!" }];
+    let model = update(start(), Message.RequestedCompletion({ id: "b", start: 2, end: 2 })).model;
+    expect(model.focus).toEqual({ id: "b", start: 2, end: 2 });
+    // An offer for a range the caret is not in is ignored.
+    expect(
+      update(model, Message.ShowCompletions({ id: "b", from: 3, to: 4, items })).model.completion,
+    ).toBeNull();
+    model = update(model, Message.ShowCompletions({ id: "b", from: 0, to: 2, items })).model;
+    expect(model.completion).toEqual({ id: "b", from: 0, to: 2, items, index: 0 });
+    expect(model.announcement).toBe("3 suggestions.");
+    model = update(
+      model,
+      Message.EditedText({ id: "b", text: "Beeta", start: 3, end: 3, time: 1 }),
+    ).model;
+    expect(model.completion).toMatchObject({ from: 0, to: 3 });
+    model = update(model, Message.MovedCompletion({ delta: 1 })).model;
+    // Only "Beehive" matches "Bee", so moving wraps back to it.
+    expect(model.completion?.index).toBe(0);
+    const accepted = update(model, Message.AcceptedCompletion({ index: 0 }));
+    expect(accepted.model.items[1]?.text).toBe("Beehive!ta");
+    expect(accepted.model.focus).toEqual({ id: "b", start: 8, end: 8 });
+    expect(accepted.model.completion).toBeNull();
+    expect(accepted.commands).toHaveLength(1);
+    expect(press(accepted.model, "Undo", "b", 4).items[1]?.text).toBe("Beeta");
+  });
+
+  it("closes suggestions when nothing matches or the outline does something else", () => {
+    const items = [{ label: "Alpha" }];
+    let model = update(start(), Message.RequestedCompletion({ id: "a", start: 1, end: 1 })).model;
+    model = update(model, Message.ShowCompletions({ id: "a", from: 0, to: 1, items })).model;
+    expect(model.completion).not.toBeNull();
+    expect(press(model, "Indent", "a", 1).completion).toBeNull();
+    const typed = update(
+      model,
+      Message.EditedText({ id: "a", text: "AXlpha", start: 2, end: 2, time: 1 }),
+    ).model;
+    expect(typed.completion).toBeNull();
+  });
+
+  it("accepts the active suggestion when no index is given", () => {
+    const items = [{ label: "Bear" }, { label: "Beta" }, { label: "Bee" }];
+    let model = update(start(), Message.RequestedCompletion({ id: "b", start: 2, end: 2 })).model;
+    model = update(model, Message.ShowCompletions({ id: "b", from: 0, to: 2, items })).model;
+    model = update(model, Message.MovedCompletion({ delta: 1 })).model;
+    expect(update(model, Message.AcceptedCompletion({})).model.items[1]?.text).toBe("Betata");
+  });
+
+  it("turns a placeholder into an item, opening its parent, as one undoable step", () => {
+    const collapsed = press(start(), "Collapse", "a");
+    const filled = update(
+      collapsed,
+      Message.FilledPlaceholder({
+        parentId: "a",
+        index: 1,
+        key: "step",
+        text: "Middle",
+        offset: 3,
+      }),
+    );
+    expect(texts(filled.model)).toEqual(["Alpha", "  One", "  Middle", "  Two", "Beta"]);
+    expect(filled.model.focus).toEqual({ id: "o-1", start: 3, end: 3 });
+    expect(filled.commands).toHaveLength(1);
+    expect(texts(press(filled.model, "Undo", "o-1"))).toEqual(["Alpha", "  One", "  Two", "Beta"]);
+    const top = update(
+      start(),
+      Message.FilledPlaceholder({ parentId: null, index: 9, key: "more", text: "", offset: 0 }),
+    ).model;
+    expect(texts(top).at(-1)).toBe("");
+  });
 });

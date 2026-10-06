@@ -28,6 +28,7 @@
 .fw-outliner__row {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   min-height: calc(var(--fw-outliner-line) + 2px);
   padding-left: calc(var(--fw-outliner-depth, 0) * var(--fw-outliner-indent));
@@ -115,6 +116,23 @@
     box-shadow 120ms ease;
 }
 
+/* A host-supplied marker, such as an opening bracket, in place of the dot. */
+.fw-outliner__marker {
+  min-width: 6px;
+  color: var(--muted-foreground, #71717a);
+  line-height: 1;
+  text-align: center;
+  transition: color 120ms ease;
+}
+
+.fw-outliner__handle:hover .fw-outliner__marker {
+  color: var(--foreground, inherit);
+}
+
+.fw-outliner__suffix {
+  pointer-events: none;
+}
+
 .fw-outliner__handle:hover .fw-outliner__dot {
   transform: scale(1.25);
 }
@@ -188,6 +206,23 @@
 .fw-outliner__mirror {
   visibility: hidden;
   pointer-events: none;
+}
+
+/* Decorated text paints its styled spans in the mirror; the textarea keeps the caret and selection. */
+.fw-outliner__cell[data-decorated="true"] .fw-outliner__mirror {
+  visibility: visible;
+}
+
+.fw-outliner__cell[data-decorated="true"] .fw-outliner__text {
+  color: transparent;
+}
+
+.fw-outliner__accessory {
+  flex: none;
+  max-width: 45%;
+  min-height: calc(var(--fw-outliner-line) + 2px);
+  margin-left: 8px;
+  overflow: hidden;
 }
 
 .fw-outliner[data-mode="Rows"] .fw-outliner__text,
@@ -332,4 +367,73 @@
   .fw-outliner__dot {
     transition: none;
   }
+}
+
+/* Placeholders: ghost children that become items when chosen or typed into. */
+.fw-outliner__plus {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted-foreground, #71717a);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fw-outliner__plus:hover {
+  color: var(--foreground, inherit);
+}
+
+.fw-outliner__placeholder .fw-outliner__text::placeholder {
+  color: var(--muted-foreground, #71717a);
+  opacity: 0.75;
+}
+
+.fw-outliner__placeholder:not(:focus-within) {
+  opacity: 0.7;
+}
+
+.fw-outliner__placeholder:hover {
+  opacity: 1;
+}
+
+/* A drop the host's policy refuses. */
+.fw-outliner__drop[data-refused="true"] {
+  background: repeating-linear-gradient(
+    to right,
+    var(--destructive, #dc2626) 0 6px,
+    transparent 6px 10px
+  );
+}
+
+.fw-outliner__drop[data-refused="true"]::before {
+  border-color: var(--destructive, #dc2626);
+}
+
+.fw-outliner-ghost[data-refused="true"] {
+  border-color: color-mix(in oklab, var(--destructive, #dc2626) 60%, transparent);
+  color: var(--muted-foreground, #71717a);
+  text-decoration: line-through;
+}
+
+.fw-outliner__row[data-readonly="true"] .fw-outliner__text {
+  cursor: default;
+}
+
+.fw-outliner__row[data-readonly="true"] .fw-outliner__handle {
+  cursor: default;
+}
+
+/* A host's view of a folded item's children, under its row. */
+.fw-outliner__view {
+  flex-basis: 100%;
+  min-width: 0;
+  margin: 2px 0 6px calc(var(--fw-outliner-toggle) + var(--fw-outliner-handle) + 2px);
+  border-radius: 6px;
+  outline: none;
+}
+
+.fw-outliner__view:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ring, #2563eb) 55%, transparent);
 }

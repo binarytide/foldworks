@@ -2,12 +2,20 @@ import { Effect, Schema as S } from "effect";
 import { Command, type Update } from "foldkit";
 import { afterCommit } from "foldkit/render";
 import { History } from "@foldworks/history";
+import { Completion } from "@foldworks/text-intelligence";
 
 import { offsetAtX } from "./caret";
 import { FOCUSED_EVENT } from "./mount";
 import { keepsFocus, type Action } from "./keymap";
 import { Message } from "./message";
-import { counterFor, domIds, type Focus, type Model, type Snapshot } from "./model";
+import {
+  counterFor,
+  domIds,
+  type Focus,
+  type Model,
+  type OpenCompletion,
+  type Snapshot,
+} from "./model";
 import {
   ancestors,
   find,
@@ -30,9 +38,11 @@ import {
   updateItem,
   walk,
   childrenOf,
+  isWithin,
   type Items,
   type Row,
 } from "./outline";
+import { refusal, reparented, type MoveCause, type Policy } from "./policy";
 import { rowsOf, selectedIds, selectedRoots } from "./selectors";
 import { parseOutline } from "./text";
 
@@ -527,6 +537,11 @@ const pressed = (
         model: { ...base, mode: "Text", selection: null },
         commands: [focusCommand(model, { _tag: "Tree" })],
       };
+    case "ShowInfo":
+      return { model: { ...base, hover: { id, offset: start, source: "Keyboard" } } };
+    case "Complete":
+      // The surface sends `RequestedCompletion` instead, for the host to answer.
+      return { model: base };
     case "SelectAll": {
       const first = rows[0];
       const last = rows[rows.length - 1];
@@ -610,7 +625,155 @@ const textChange = (previous: string, next: string): number => {
   return previous.length - suffix;
 };
 
-export const update = (model: Model, message: Message): UpdateReturn =>
+/** Messages that leave hover information showing; anything else, such as typing, hides it. */
+const keepsHover = (message: Message): boolean =>
+  message._tag === "Hovered" ||
+  message._tag === "DismissedHover" ||
+  message._tag === "CompletedFocus" ||
+  (message._tag === "Pressed" && message.action === "ShowInfo");
+
+/** Messages that leave suggestions open. Typing narrows them instead; anything else closes them. */
+const keepsCompletion = (model: Model, message: Message): boolean => {
+  switch (message._tag) {
+    case "ShowCompletions":
+    case "RequestedCompletion":
+    case "MovedCompletion":
+    case "EditedText":
+    case "Hovered":
+    case "DismissedHover":
+    case "CompletedFocus":
+      return true;
+    case "FocusedText":
+      return message.id === model.completion?.id;
+    case "Pressed":
+      return message.action === "ShowInfo";
+    default:
+      return false;
+  }
+};
+
+const MOVES: ReadonlySet<Action> = new Set(["Indent", "Outdent", "MoveUp", "MoveDown"]);
+const HISTORY: ReadonlySet<string> = new Set(["ClickedUndo", "ClickedRedo"]);
+
+/**
+ * What a message moves, if it moves items, for checking a policy. Besides the
+ * move keys and drops, Return outdents an empty last child and joining items
+ * carries the joined item's children to a new parent.
+ */
+const moveOf = (
+  model: Model,
+  message: Message,
+  after: Items,
+): Readonly<{ cause: MoveCause; ids: ReadonlyArray<string> }> | undefined => {
+  if (message._tag === "Dropped") return { cause: "Drop", ids: model.drag?.ids ?? [] };
+  if (message._tag !== "Pressed") return undefined;
+  if (MOVES.has(message.action)) {
+    const ids =
+      model.mode === "Rows" && model.selection !== null ? selectedRoots(model) : [message.id];
+    return { cause: message.action as MoveCause, ids };
+  }
+  const moved = reparented(model.items, after).map((move) => move.id);
+  if (moved.length === 0) return undefined;
+  return message.action === "Split"
+    ? { cause: "Outdent", ids: roots(model.items, moved) }
+    : { cause: "Merge", ids: roots(model.items, moved) };
+};
+
+/** Leaves the document as it was and says why, keeping the caret where the key was pressed. */
+const refuse = (model: Model, message: Message, reason: string): UpdateReturn => {
+  const caret =
+    message._tag === "Pressed" && model.mode === "Text"
+      ? { id: message.id, start: message.start, end: message.end }
+      : model.focus;
+  const kept: Model = {
+    ...model,
+    focus: caret,
+    drag: null,
+    hover: null,
+    completion: null,
+    announcement: reason,
+  };
+  return message._tag === "Pressed" && !keepsFocus(message.action)
+    ? refocus(kept)
+    : { model: kept };
+};
+
+/**
+ * Applies a message. A `policy` can refuse moves and protect read-only items.
+ * Edits a host makes with `Replace` or `Load` are not checked, and neither is
+ * undo or redo, which return to a document the outline already had.
+ */
+export const update = (model: Model, message: Message, policy: Policy = {}): UpdateReturn => {
+  const result = updateOutline(model, message);
+  const travels =
+    HISTORY.has(message._tag) ||
+    (message._tag === "Pressed" && (message.action === "Undo" || message.action === "Redo"));
+  if (
+    (policy.canMove !== undefined || policy.isReadOnly !== undefined) &&
+    message._tag !== "Replace" &&
+    message._tag !== "Load" &&
+    !travels
+  ) {
+    const move = moveOf(model, message, result.model.items);
+    const reason = refusal(policy, model.items, result.model.items, move);
+    if (reason !== undefined) return refuse(model, message, reason);
+  }
+  const hover = keepsHover(message) ? result.model.hover : null;
+  const completion = keepsCompletion(model, message) ? result.model.completion : null;
+  return hover === result.model.hover && completion === result.model.completion
+    ? result
+    : { ...result, model: { ...result.model, hover, completion } };
+};
+
+/** The caret in the item suggestions are for, as far as the model knows. */
+const completionCaret = (model: Model, list: OpenCompletion): number =>
+  model.focus?.id === list.id ? model.focus.end : list.to;
+
+/** Narrows open suggestions after an item's text changed, closing them when nothing matches. */
+const narrowed = (
+  model: Model,
+  id: string,
+  before: string,
+  after: string,
+  caret: number,
+): OpenCompletion | null => {
+  const list = model.completion;
+  if (list === null || list.id !== id) return null;
+  const next = Completion.track(list, before, after, caret);
+  return next === undefined || Completion.visible(next, after, caret).length === 0
+    ? null
+    : { ...next, id };
+};
+
+const acceptCompletion = (model: Model, index: number | undefined): UpdateReturn => {
+  const list = model.completion;
+  const node = list === null ? undefined : find(model.items, list.id);
+  if (list === null || node === undefined) return { model: { ...model, completion: null } };
+  const caret = completionCaret(model, list);
+  const shown = Completion.visible(list, node.text, caret);
+  const chosen = shown[index ?? Math.min(list.index, shown.length - 1)];
+  if (chosen === undefined) return { model: { ...model, completion: null } };
+  const accepted = Completion.accept(list, node.text, chosen);
+  const items = updateItem(model.items, list.id, (current) => ({
+    ...current,
+    text: accepted.text,
+  }));
+  const committed = commit(
+    { ...model, completion: null, history: History.breakCoalescing(model.history) },
+    items,
+    {
+      before: { id: list.id, start: caret, end: caret },
+      announcement: `Inserted ${chosen.label}.`,
+    },
+  );
+  return editText(
+    { ...committed, history: History.breakCoalescing(committed.history) },
+    textFocus(list.id, accepted.caret),
+    items,
+  );
+};
+
+const updateOutline = (model: Model, message: Message): UpdateReturn =>
   Message.match<UpdateReturn>(message, {
     Pressed: ({ action, id, start, end, goalX }) => {
       const result = pressed(model, action, id, start, end, goalX);
@@ -639,6 +802,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
           focus: { id, start, end },
           mode: "Text",
           selection: null,
+          completion: narrowed(model, id, node.text, text, end),
         },
       };
     },
@@ -702,6 +866,9 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       const drag = model.drag;
       const cleared: Model = { ...model, drag: null };
       if (drag === null || drag.target === null) return { model: cleared };
+      if (drag.target.refused === true) {
+        return { model: { ...cleared, announcement: "Can't move there." } };
+      }
       const items = moveItems(model.items, drag.ids, drag.target.placement);
       if (items === undefined) return { model: cleared };
       const moved = commit(cleared, items, {
@@ -710,6 +877,71 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       return selectRows(moved, drag.ids[0]!, drag.ids.at(-1)!);
     },
     CancelledDrag: () => ({ model: { ...model, drag: null } }),
+    Hovered: ({ target }) => {
+      const current = model.hover;
+      if (target === null) return { model: current === null ? model : { ...model, hover: null } };
+      return current !== null &&
+        current.source === "Pointer" &&
+        current.id === target.id &&
+        current.offset === target.offset
+        ? { model }
+        : { model: { ...model, hover: { ...target, source: "Pointer" } } };
+    },
+    DismissedHover: () => ({ model: model.hover === null ? model : { ...model, hover: null } }),
+    RequestedCompletion: ({ id, start, end }) =>
+      find(model.items, id) === undefined
+        ? { model }
+        : { model: { ...model, mode: "Text", selection: null, focus: { id, start, end } } },
+    ShowCompletions: ({ id, from, to, items }) => {
+      const node = find(model.items, id);
+      const caret = model.focus?.id === id ? model.focus.end : undefined;
+      if (
+        node === undefined ||
+        caret === undefined ||
+        from < 0 ||
+        from > to ||
+        to > node.text.length ||
+        caret < from ||
+        caret > to
+      ) {
+        return { model };
+      }
+      const list: OpenCompletion = { id, ...Completion.open(from, to, items) };
+      const shown = Completion.visible(list, node.text, caret).length;
+      if (shown === 0) return { model: { ...model, completion: null } };
+      return {
+        model: {
+          ...model,
+          completion: list,
+          announcement:
+            model.completion === null ? `${plural(shown, "suggestion")}.` : model.announcement,
+        },
+      };
+    },
+    MovedCompletion: ({ delta }) => {
+      const list = model.completion;
+      const node = list === null ? undefined : find(model.items, list.id);
+      if (list === null || node === undefined) return { model };
+      const count = Completion.visible(list, node.text, completionCaret(model, list)).length;
+      return {
+        model: { ...model, completion: { ...Completion.move(list, delta, count), id: list.id } },
+      };
+    },
+    AcceptedCompletion: ({ index }) => acceptCompletion(model, index),
+    FilledPlaceholder: ({ parentId, index, text, offset }) => {
+      if (parentId !== null && find(model.items, parentId) === undefined) return { model };
+      const { id, nextId } = newId(model);
+      const opened = parentId === null ? model.items : setCollapsed(model.items, parentId, false);
+      const items = insertItems(opened, parentId, index, [item(id, text)]);
+      if (items === undefined) return { model };
+      const caret = Math.max(0, Math.min(offset, text.length));
+      return editText(
+        { ...commit(model, items, { announcement: "Added an item." }), nextId },
+        textFocus(id, caret),
+        items,
+      );
+    },
+    DismissedCompletion: () => ({ model: { ...model, completion: null } }),
     Hoisted: ({ id }) => hoist(model, id),
     ClickedAdd: () => {
       const { id, nextId } = newId(model);
@@ -749,5 +981,44 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         nextId: Math.max(model.nextId, counterFor(model.id, items)),
       },
     }),
+    Replace: ({ items, announcement, coalescingKey }) => {
+      if (items === model.items) return { model };
+      const committed = commit(model, items, {
+        announcement,
+        ...(coalescingKey === undefined ? {} : { coalescingKey }),
+      });
+      const exists = (id: string) => find(items, id) !== undefined;
+      const selection = model.selection;
+      return {
+        model: {
+          ...committed,
+          scopeId: model.scopeId !== null && exists(model.scopeId) ? model.scopeId : null,
+          focus: model.focus !== null && exists(model.focus.id) ? model.focus : null,
+          ...(selection !== null && !(exists(selection.anchorId) && exists(selection.headId))
+            ? { mode: "Text" as const, selection: null }
+            : {}),
+          nextId: Math.max(model.nextId, counterFor(model.id, items)),
+        },
+      };
+    },
+    Reveal: ({ id }) => {
+      const node = find(model.items, id);
+      if (node === undefined) return { model };
+      const items = ancestors(model.items, id).reduce(
+        (nodes, ancestor) => setCollapsed(nodes, ancestor, false),
+        model.items,
+      );
+      const scopeId =
+        isWithin(items, id, model.scopeId) && id !== model.scopeId ? model.scopeId : null;
+      return editText(
+        {
+          ...model,
+          scopeId,
+          revision: items === model.items ? model.revision : model.revision + 1,
+        },
+        textFocus(id, node.text.length),
+        items,
+      );
+    },
     CompletedFocus: () => ({ model }),
   });

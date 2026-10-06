@@ -34,6 +34,9 @@ accessible application interfaces with Foldkit:
   documents, editing, validation, rendering, and rule reordering.
 - [`@foldworks/outliner`](./packages/outliner) — a keyboard-first outliner
   with natural indenting, reordering, folding, hoisting, and drag and drop.
+- [`@foldworks/text-intelligence`](./packages/text-intelligence) — the shared
+  vocabulary and popups for hover, completion, highlighting, and diagnostics
+  on text surfaces.
 - [`@foldworks/form-builder`](./packages/form-builder) — section-first form
   documents, immutable operations, registries, and drag-and-drop primitives.
 - [`@foldworks/diagram`](./packages/diagram) — compound directed-graph
@@ -61,8 +64,13 @@ for the source pipeline and how to add reducer explorers. Its `/agent` reference
 text, tool calls and results, an interactive permission checkpoint, a model
 picker, and a prompt composer. Its `/statechart` editor builds a nested state
 machine with cycles, parallel regions, submachines, notes, and a simulator on
-`@foldworks/diagram`. The agent flow is a deterministic browser-only
-fixture and performs no provider calls or tool side effects.
+`@foldworks/diagram`. The agent flow is a deterministic browser-only fixture
+and performs no provider calls or tool side effects.
+
+[Language workbench primitives](./docs/language-workbench.md) records the
+contracts a language workbench builds on: shared text intelligence for outline
+rows and the code editor, placeholder rows, structure policy, a structural tree
+diff, and a lazily loaded value tree.
 
 See [planned work-surface primitives](./docs/planned-primitives.md) for the
 next areas to explore beyond the current package suite.

@@ -61,6 +61,21 @@ avoid ordinary decimal stepping drift. The parent owns the numeric value.
 states. It derives statuses from `currentStepId` unless a step overrides its
 status. Provide `onSelect` for nonlinear journeys; omit it for read-only progress.
 
+`Stepper` is also the playhead for stepping through a trace, such as the steps
+an evaluation took or a workflow run. Render it vertically, one step per
+traced event, with what the step did as its `description`; `currentStepId`
+marks the current step with `aria-current="step"`, steps before it read as
+complete, and `onSelect` jumps to any step. Pair it with Previous and Next
+buttons, and show where the current step happened in the views beside it, for
+example with an outliner decoration's `tone` or a code editor `highlights`
+range. The statechart simulator demo uses this pattern to replay a run,
+showing the active states at each transition.
+The host handles arrow keys and scrolling the selected step into view. Send
+relative Previous and Next messages and resolve the index in `update`, so
+rapid clicks advance from the latest state.
+`TransactionTimeline` is the better fit for attributed history that is read
+rather than replayed.
+
 ## Metrics and technical details
 
 `Badge` and `Tag` share neutral, muted, accent, success, warning, danger, and
