@@ -24,6 +24,7 @@ const fixtures = [
   { name: "panel-and-layout", heading: "Panel and Layout" },
   { name: "toolbar", heading: "Toolbar" },
   { name: "semantic-tokens", heading: "Semantic tokens" },
+  { name: "loading-feedback", heading: "Loading feedback" },
 ] as const;
 
 type Mode = "Light" | "Dark";
